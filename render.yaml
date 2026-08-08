@@ -1,0 +1,37 @@
+services:
+  - type: web
+    name: techsploits-voice
+    runtime: python
+    plan: free          # NOTE: free tier sleeps; see README "Always-on" section
+    # For calls that must NEVER miss, switch plan to: starter (~$7/mo, always on)
+    region: oregon
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: SIGNALWIRE_SIGNING_KEY
+        sync: false
+      - key: NOUS_API_KEY
+        sync: false
+      - key: NOUS_BASE_URL
+        value: https://inference-api.nousresearch.com/v1
+      - key: NOUS_MODEL
+        value: tencent/hy3:free
+      - key: DEEPGRAM_API_KEY
+        sync: false
+      - key: TTS_ENGINE
+        value: elevenlabs
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: SIGNALWIRE_PROJECT_ID
+        sync: false
+      - key: SIGNALWIRE_SPACE_URL
+        sync: false
+      - key: SIGNALWIRE_PHONE
+        sync: false
+      - key: SHOP_EMAIL
+        value: brent@techsploits.com
+      - key: DRY_RUN
+        value: "false"
