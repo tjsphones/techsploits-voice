@@ -21,10 +21,16 @@ services:
         value: tencent/hy3:free
       - key: DEEPGRAM_API_KEY
         sync: false
-      - key: TTS_ENGINE
-        value: elevenlabs
-      - key: ELEVENLABS_API_KEY
+      - key: GOOGLE_API_KEY
         sync: false
+      - key: FRONT_MODEL
+        value: gemini-flash-latest
+      - key: FRONT_BASE_URL
+        value: https://generativelanguage.googleapis.com/v1beta/openai
+      - key: GEMINI_TTS_MODEL
+        value: gemini-3.1-flash-tts-preview
+      - key: TTS_ENGINE
+        value: gemini
       - key: SIGNALWIRE_PROJECT_ID
         sync: false
       - key: SIGNALWIRE_SPACE_URL
