@@ -13,9 +13,15 @@ caller -> SignalWire <Connect><Stream> (wss) -> Render server
 Mid-call, the agent can call `send_sms` / `send_email` via the /swaig webhook.
 
 ## Honest notes
-- The "brain" is Nous's **public** inference API (inference-api.nousresearch.com),
-  reached with a Nous API key — NOT through Hermes's internal gateway (that
-  token can't be exported to Render). Same model, public endpoint.
+- The "brain" is a **two-tier router** (see "Brain router" below): a fast model
+  (Google Gemma via OpenRouter, free) handles light talk in ~1-2s, and escalates
+  harder questions to your **Nous `tencent/hy3:free`** model (BYOK, not logged to
+  the provider) for real reasoning. Both are reached via their public OpenAI-
+  compatible APIs with keys — NOT through Hermes's internal gateway (that token
+  can't be exported to Render).
+- Privacy split: light chit-chat goes to OpenRouter (free tier logs prompts for
+  training); anything escalated for reasoning stays on Nous (BYOK, private). If
+  you want ALL calls private, leave `FRONT_API_KEY` unset and everything uses Nous.
 - Free Render tier **sleeps**; a sleeping server can't answer a ringing phone.
   For calls that must never miss, use the `starter` plan (~$7/mo, always on) in
   render.yaml, or host on an always-on machine.
@@ -59,9 +65,21 @@ real, implement the TODO blocks in app.py:
 - SMS: SignalWire REST "Send Message" with SIGNALWIRE_TOKEN.
 - Email: SMTP via EMAIL_SMTP_* (your Gmail app password) or a provider.
 
+## Brain router (recommended)
+Two models share the call:
+- **FRONT** (`FRONT_MODEL`, default `google/gemma-4-26b-a4b-it:free` via OpenRouter):
+  fast, non-reasoning. Greets, gives hours, books, answers simple FAQs. ~1-2s.
+- **REASON** (`REASON_MODEL`, default `tencent/hy3:free` via Nous): your "heavy"
+  brain. Runs ONLY when FRONT replies with the `ESCALATE` keyword (it does so
+  when a question needs diagnosis, tradeoffs, or it's unsure). The caller just
+  hears one answer either way; hard questions cost ~7s, easy ones ~1-2s.
+
+To disable the router and use Nous for everything (max privacy, slower), leave
+`FRONT_API_KEY` unset in the environment.
+
 ## Files
 - app.py          - WebSocket voice loop + /voice cXML + /swaig webhook
-- nous_client.py  - the brain (OpenAI-compat relay to Nous + shop context)
+- nous_client.py  - two-tier brain router (FRONT fast / REASON heavy) + shop context
 - stt.py / tts.py - speech adapters (Deepgram / ElevenLabs, dry_run fallback)
 - shop_context.md - what the agent knows about the shop (edit freely)
 - smoketest.py    - offline test (DRY_RUN, no creds): `python smoketest.py`

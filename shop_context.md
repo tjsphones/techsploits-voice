@@ -19,3 +19,7 @@ What the agent should know about Brent's world (so it is NOT a blank slate):
 
 Update this file whenever Brent wants the agent to know something new. It is
 injected into every call's system prompt.
+
+Shop hours (front model will read these so it can answer directly):
+- Mon-Fri 9am-6pm, Sat 10am-4pm, closed Sunday. (CONFIRM before quoting; if
+  unsure, offer to text/email the customer the exact hours.)
