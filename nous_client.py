@@ -14,9 +14,10 @@ import os
 import requests
 
 # ---- FRONT (fast, light conversation) ----
-FRONT_BASE_URL = os.getenv("FRONT_BASE_URL", "https://openrouter.ai/api/v1")
-FRONT_API_KEY  = os.getenv("FRONT_API_KEY", os.getenv("OPENROUTER_API_KEY", ""))
-FRONT_MODEL    = os.getenv("FRONT_MODEL", "google/gemma-4-26b-a4b-it:free")
+FRONT_BASE_URL = os.getenv("FRONT_BASE_URL",
+                            "https://generativelanguage.googleapis.com/v1beta/openai")
+FRONT_API_KEY  = os.getenv("FRONT_API_KEY", os.getenv("GOOGLE_API_KEY", ""))
+FRONT_MODEL    = os.getenv("FRONT_MODEL", "gemini-flash-latest")
 
 # ---- REASON (heavy, your Nous brain) ----
 REASON_BASE_URL = os.getenv("REASON_BASE_URL", "https://inference-api.nousresearch.com/v1")
