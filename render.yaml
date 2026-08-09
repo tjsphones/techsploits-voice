@@ -6,6 +6,7 @@ services:
     # For calls that must NEVER miss, switch plan to: starter (~$7/mo, always on)
     region: oregon
     branch: master
+    repo: https://github.com/tjsphones/techsploits-voice
     buildCommand: pip install -r requirements.txt
     startCommand: python app.py
     envVars:
