@@ -5,7 +5,7 @@ services:
     plan: free          # NOTE: free tier sleeps; see README "Always-on" section
     # For calls that must NEVER miss, switch plan to: starter (~$7/mo, always on)
     region: oregon
-    branch: main
+    branch: master
     buildCommand: pip install -r requirements.txt
     startCommand: python app.py
     envVars:
