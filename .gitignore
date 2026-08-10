@@ -4,3 +4,12 @@ __pycache__/
 *.pyc
 *.pyo
 .DS_Store
+
+# local test scratch (not part of the deployment)
+agent_reply.wav
+live_test.py
+live_test_local.py
+probe_keys.py
+probe_stt_real.py
+probe_stt_real2.py
+voice_test_real.py

@@ -74,12 +74,13 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse()
     await ws.prepare(request)
 
-    # optional bearer auth
+    # Optional bearer auth. NOTE: SignalWire's native <Stream> does NOT send a
+    # bearer token, so we must NOT close the connection on a missing/!matching
+    # header — that would reject every real inbound call. Log only.
     auth = request.headers.get("Authorization", "")
     if AUTH_TOKEN and not auth.endswith(AUTH_TOKEN):
-        log.warning("ws auth failed")
-        await ws.close()
-        return ws
+        log.warning("ws auth token absent/mismatched (allowing: SignalWire "
+                     "stream sends no bearer)")
 
     stream_sid = None
     audio_buf = bytearray()
