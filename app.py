@@ -106,6 +106,10 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                     "media": {"payload": base64.b64encode(frame).decode()},
                 }
                 await ws.send_json(msg)
+                # Pace frames at real-time (~20ms each) so SignalWire plays
+                # them at the correct rate. Blasting them instantly garbles
+                # the agent's voice on the caller's end.
+                await asyncio.sleep(0.02)
             # mark so we know playback flushed
             if not ws.closed:
                 await ws.send_json({"event": "mark", "streamSid": stream_sid,
