@@ -89,19 +89,29 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
     async def send_audio(mulaw_bytes: bytes):
         # chunk into ~20ms frames (160 bytes @ 8k) and stream
         chunk = 160
-        for i in range(0, len(mulaw_bytes), chunk):
-            frame = mulaw_bytes[i:i + chunk]
-            if not frame:
-                break
-            msg = {
-                "event": "media",
-                "streamSid": stream_sid,
-                "media": {"payload": base64.b64encode(frame).decode()},
-            }
-            await ws.send_json(msg)
-        # mark so we know playback flushed
-        await ws.send_json({"event": "mark", "streamSid": stream_sid,
-                            "mark": {"name": "done"}})
+        if ws.closed:
+            log.warning("send_audio: ws already closed, skipping")
+            return
+        try:
+            for i in range(0, len(mulaw_bytes), chunk):
+                frame = mulaw_bytes[i:i + chunk]
+                if not frame:
+                    break
+                if ws.closed:
+                    log.warning("send_audio: ws closed mid-send (caller hung up)")
+                    return
+                msg = {
+                    "event": "media",
+                    "streamSid": stream_sid,
+                    "media": {"payload": base64.b64encode(frame).decode()},
+                }
+                await ws.send_json(msg)
+            # mark so we know playback flushed
+            if not ws.closed:
+                await ws.send_json({"event": "mark", "streamSid": stream_sid,
+                                    "mark": {"name": "done"}})
+        except Exception as e:
+            log.warning("send_audio aborted (caller likely hung up): %s", e)
 
     async for msg in ws:
         if msg.type == WSMsgType.TEXT:
@@ -113,6 +123,16 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 stream_sid = data["start"]["streamSid"]
                 fmt = data["start"].get("mediaFormat", {})
                 log.info("stream start sid=%s fmt=%s", stream_sid, fmt)
+                # Play an instant greeting so the caller hears SOMETHING
+                # immediately (zero pipeline latency). Stops the "is it dead?"
+                # hang-ups while we wait for the first real turn.
+                try:
+                    greet = tts.synthesize(
+                        "Thanks for calling Techsploits! Give me one second "
+                        "and I'll be right with you.")
+                    await send_audio(greet)
+                except Exception as e:
+                    log.warning("greeting failed: %s", e)
             elif event == "media":
                 payload = data["media"]["payload"]
                 audio_buf.extend(base64.b64decode(payload))
@@ -127,8 +147,9 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
             log.error("ws error %s", ws.exception())
             break
 
-        # Simple turn trigger: process when we have ~1.5s of audio buffered.
-        if len(audio_buf) >= 12000:  # ~1.5s @ 8k mulaw
+        # Turn trigger: process when we have ~0.7s of audio (lower latency so
+        # the first reply comes back fast), or a 0.4s trailing gap (VAD-ish).
+        if len(audio_buf) >= 5600:  # ~0.7s @ 8k mulaw
             buf = bytes(audio_buf)
             audio_buf = bytearray()
             text = stt.transcribe(buf)
