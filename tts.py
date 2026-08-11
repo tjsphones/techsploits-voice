@@ -20,38 +20,72 @@ import numpy as np
 
 ENGINE = os.getenv("TTS_ENGINE", "dry_run")
 
-# Output gain for the phone. mu-law has limited dynamic headroom, so we boost
-# the 16-bit PCM BEFORE mu-law encoding (not after) or it won't get louder.
-# 1.6 ≈ +60% perceived loudness. Tune via TTS_GAIN env. Clamped to int16 to
-# avoid wrap-around distortion.
-GAIN = float(os.getenv("TTS_GAIN", "1.6"))
+# Loudness normalization for the phone. A flat gain (TTS_GAIN) was too weak:
+# Gemini returns low-level audio and 1.6x only reached ~-30 dBFS. Instead we
+# normalize to a TARGET RMS (loudness), so output is consistently audible
+# regardless of what the TTS engine returns. -20 dBFS RMS ~ comfortable phone
+# level. Capped at the int16 rail so it can never clip/distort.
+TARGET_DB = float(os.getenv("TTS_TARGET_DB", "-20"))
+TARGET_RMS = 10 ** (TARGET_DB / 20.0) * 32768.0  # linear scale vs 16-bit FS
+# Never boost quiet audio more than this many times (safety against noise
+# amplification); most real speech needs <4x.
+MAX_BOOST = float(os.getenv("TTS_MAX_BOOST", "12.0"))
 
 
-def _apply_gain(pcm: np.ndarray, gain: float = GAIN) -> np.ndarray:
-    """Scale 16-bit PCM amplitude by `gain`, clamped to int16 range."""
-    if gain == 1.0:
-        return pcm
-    return np.clip(pcm.astype(np.float32) * gain, -32768, 32767).astype(np.int16)
+def _normalize(pcm: np.ndarray) -> np.ndarray:
+    """Scale PCM to TARGET_RMS loudness, clamped to int16 to avoid clipping.
+
+    If the sample is already louder than target, leave it (don't attenuate
+    quiet-down clicks). Returns int16 numpy array.
+    """
+    pcm = pcm.astype(np.float32)
+    rms = float(np.sqrt(np.mean(pcm ** 2)))
+    if rms < 1e-3:
+        return pcm.astype(np.int16)  # silence: don't amplify
+    boost = min(TARGET_RMS / rms, MAX_BOOST)
+    return np.clip(pcm * boost, -32768, 32767).astype(np.int16)
 
 
 
 def _mulaw_encode(pcm16: np.ndarray) -> bytes:
-    """Encode 16-bit PCM (int16, -32768..32767) to 8-bit mu-law bytes."""
-    # Simple mu-law approximation (ITU standard). Good enough for telephony.
-    MULAW_BIAS = 33
+    """ITU-T G.711 mu-law encode: 16-bit PCM -> 8-bit mu-law.
+
+    This is the STANDARD algorithm (matches what SignalWire / ffmpeg decode),
+    so round-trip level is preserved. The previous custom approximation lost
+    ~22 dB and made the agent quiet + muffled.
+    """
     pcm = pcm16.astype(np.int32)
     sign = (pcm < 0).astype(np.int32)
-    pcm = np.abs(pcm) + MULAW_BIAS
-    pcm = np.clip(pcm, 0, 0x7FFF)
-    # segment quantization
-    mask = np.clip((np.log2(pcm + 1) - 1).astype(np.int32), 0, 7)
-    seg_end = (0x80 * (1 << mask)).astype(np.int32)
-    seg_start = (seg_end >> 1).astype(np.int32)
-    index = np.clip((pcm - seg_start) * 16 / (seg_end - seg_start), 0, 15).astype(np.int32)
-    code = (index + 16 * seg_end // 0x80).astype(np.int32)
+    mag = np.abs(pcm)
+    # bias + clip
+    mag = np.clip(mag, 0, 0x7FFF) + 33
+    # segment
+    seg = np.zeros_like(mag)
+    for s in range(1, 8):
+        seg = np.where(mag >= (0x80 << s), s, seg)
+    # quantization
+    seg_start = 0x80 << seg
+    seg_end = 0x80 << (seg + 1)
+    index = (mag - seg_start) * 16 // (seg_end - seg_start)
+    index = np.clip(index, 0, 15)
+    code = index + 16 * (seg + 1)
     code = np.where(sign, code | 0x80, code)
+    # standard mu-law bit inversion
     code = ~code & 0xFF
     return code.astype(np.uint8).tobytes()
+
+
+def _decode_mulaw(data: bytes) -> np.ndarray:
+    """Inverse of _mulaw_encode (standard ITU-T G.711)."""
+    arr = np.frombuffer(data, dtype=np.uint8).astype(np.int32)
+    arr = ~arr & 0xFF
+    sign = (arr & 0x80) >> 7
+    seg = (arr >> 4) & 0x07
+    index = arr & 0x0F
+    seg_start = 0x80 << seg
+    sample = seg_start + (index << (seg + 3)) + (1 << (seg + 2))
+    sample = np.where(sign, -sample, sample)
+    return sample.astype(np.int16)
 
 
 def _resample_and_encode(wav_16k_path: str) -> bytes:
@@ -61,7 +95,7 @@ def _resample_and_encode(wav_16k_path: str) -> bytes:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
             out8 = tf.name
         subprocess.run(
-            ["ffmpeg", "-y", "-i", wav_16k_path, "-af", f"volume={GAIN}",
+            ["ffmpeg", "-y", "-i", wav_16k_path,
              "-ar", "8000", "-ac", "1", "-f", "mulaw", out8],
             check=True, capture_output=True,
         )
@@ -80,7 +114,7 @@ def _resample_and_encode(wav_16k_path: str) -> bytes:
         pcm = np.frombuffer(raw, dtype=np.int16)
         if fr == 16000:
             pcm = pcm[::2]
-        return _mulaw_encode(_apply_gain(pcm))
+        return _mulaw_encode(_normalize(pcm))
 
 
 def synthesize(text: str) -> bytes:
@@ -144,25 +178,10 @@ def synthesize_gemini(text: str) -> bytes:
         # fall back to 200ms silence so the call doesn't break
         return b"\xff" * (8000 // 5)
     raw = base64.b64decode(b64)
-    # Gemini returns 24k l16; resample to 8k mulaw via ffmpeg if present
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
-            w24 = tf.name
-        with open(w24, "wb") as f:
-            f.write(raw)
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as outf:
-            w8 = outf.name
-        subprocess.run(["ffmpeg", "-y", "-i", w24, "-af", f"volume={GAIN}",
-                        "-ar", "8000", "-ac", "1", "-f", "mulaw", w8],
-                       check=True, capture_output=True)
-        with open(w8, "rb") as f:
-            data = f.read()
-        os.unlink(w24); os.unlink(w8)
-        return data[44:] if data[:4] == b"RIFF" else data
-    except Exception:
-        # numpy fallback: raw l16 at 24k; decode + downsample + encode
-        if raw[:4] == b"RIFF":
-            raw = raw[44:]
-        pcm = np.frombuffer(raw, dtype=np.int16)
-        pcm = pcm[::3]  # ~24k -> 8k
-        return _mulaw_encode(_apply_gain(pcm))
+    # Gemini returns 24k l16. Downsample to 8k, NORMALIZE loudness to target,
+    # then encode with the standard (correct) mu-law routine.
+    if raw[:4] == b"RIFF":
+        raw = raw[44:]
+    pcm = np.frombuffer(raw, dtype=np.int16)
+    pcm = pcm[::3]  # ~24k -> 8k
+    return _mulaw_encode(_normalize(pcm))
