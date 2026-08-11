@@ -20,6 +20,20 @@ import numpy as np
 
 ENGINE = os.getenv("TTS_ENGINE", "dry_run")
 
+# Output gain for the phone. mu-law has limited dynamic headroom, so we boost
+# the 16-bit PCM BEFORE mu-law encoding (not after) or it won't get louder.
+# 1.6 ≈ +60% perceived loudness. Tune via TTS_GAIN env. Clamped to int16 to
+# avoid wrap-around distortion.
+GAIN = float(os.getenv("TTS_GAIN", "1.6"))
+
+
+def _apply_gain(pcm: np.ndarray, gain: float = GAIN) -> np.ndarray:
+    """Scale 16-bit PCM amplitude by `gain`, clamped to int16 range."""
+    if gain == 1.0:
+        return pcm
+    return np.clip(pcm.astype(np.float32) * gain, -32768, 32767).astype(np.int16)
+
+
 
 def _mulaw_encode(pcm16: np.ndarray) -> bytes:
     """Encode 16-bit PCM (int16, -32768..32767) to 8-bit mu-law bytes."""
@@ -47,8 +61,8 @@ def _resample_and_encode(wav_16k_path: str) -> bytes:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
             out8 = tf.name
         subprocess.run(
-            ["ffmpeg", "-y", "-i", wav_16k_path, "-ar", "8000", "-ac", "1",
-             "-f", "mulaw", out8],
+            ["ffmpeg", "-y", "-i", wav_16k_path, "-af", f"volume={GAIN}",
+             "-ar", "8000", "-ac", "1", "-f", "mulaw", out8],
             check=True, capture_output=True,
         )
         with open(out8, "rb") as f:
@@ -66,7 +80,7 @@ def _resample_and_encode(wav_16k_path: str) -> bytes:
         pcm = np.frombuffer(raw, dtype=np.int16)
         if fr == 16000:
             pcm = pcm[::2]
-        return _mulaw_encode(pcm)
+        return _mulaw_encode(_apply_gain(pcm))
 
 
 def synthesize(text: str) -> bytes:
@@ -138,8 +152,9 @@ def synthesize_gemini(text: str) -> bytes:
             f.write(raw)
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as outf:
             w8 = outf.name
-        subprocess.run(["ffmpeg", "-y", "-i", w24, "-ar", "8000", "-ac", "1",
-                        "-f", "mulaw", w8], check=True, capture_output=True)
+        subprocess.run(["ffmpeg", "-y", "-i", w24, "-af", f"volume={GAIN}",
+                        "-ar", "8000", "-ac", "1", "-f", "mulaw", w8],
+                       check=True, capture_output=True)
         with open(w8, "rb") as f:
             data = f.read()
         os.unlink(w24); os.unlink(w8)
@@ -150,4 +165,4 @@ def synthesize_gemini(text: str) -> bytes:
             raw = raw[44:]
         pcm = np.frombuffer(raw, dtype=np.int16)
         pcm = pcm[::3]  # ~24k -> 8k
-        return _mulaw_encode(pcm)
+        return _mulaw_encode(_apply_gain(pcm))

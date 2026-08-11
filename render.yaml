@@ -32,6 +32,8 @@ services:
         value: gemini-3.1-flash-tts-preview
       - key: TTS_ENGINE
         value: gemini
+      - key: TTS_GAIN
+        value: "1.6"   # receptionist volume boost (~+60%); raise/lower to taste
       - key: SIGNALWIRE_PROJECT_ID
         sync: false
       - key: SIGNALWIRE_SPACE_URL
