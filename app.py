@@ -125,6 +125,8 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
     stream_sid = None
     audio_buf = bytearray()
     convo = []  # rolling {role, content}
+    last_audio_ts = 0.0   # monotonic time of last media frame
+    processing = False     # true while a turn is in flight (avoid overlap)
 
     async def send_audio(mulaw_bytes: bytes):
         # chunk into ~20ms frames (160 bytes @ 8k) and stream
@@ -167,19 +169,18 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 stream_sid = data["start"]["streamSid"]
                 fmt = data["start"].get("mediaFormat", {})
                 log.info("stream start sid=%s fmt=%s", stream_sid, fmt)
-                # Play an instant greeting so the caller hears SOMETHING
-                # immediately (zero pipeline latency). Stops the "is it dead?"
-                # hang-ups while we wait for the first real turn.
+                # Play a SHORT instant greeting so the caller hears a live
+                # human-ish voice immediately (no dead air -> no premature hangup).
                 try:
                     greet = tts.synthesize(
-                        "Thanks for calling Techsploits! Give me one second "
-                        "and I'll be right with you.")
+                        "Techsploits, this is Chris — how can I help you today?")
                     await send_audio(greet)
                 except Exception as e:
                     log.warning("greeting failed: %s", e)
             elif event == "media":
                 payload = data["media"]["payload"]
                 audio_buf.extend(base64.b64decode(payload))
+                last_audio_ts = asyncio.get_event_loop().time()
             elif event == "mark":
                 pass
             elif event == "stop":
@@ -191,27 +192,52 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
             log.error("ws error %s", ws.exception())
             break
 
-        # Turn trigger: process when we have ~0.7s of audio (lower latency so
-        # the first reply comes back fast), or a 0.4s trailing gap (VAD-ish).
-        if len(audio_buf) >= 5600:  # ~0.7s @ 8k mulaw
+        # Turn trigger: process when we have ~0.7s of buffered audio, OR when
+        # ~0.5s of silence has elapsed since the last frame AND we have >=0.2s
+        # buffered (so Chris answers after the caller STOPS talking, not only
+        # on long utterances). Skip if a turn is already in flight.
+        now = asyncio.get_event_loop().time()
+        have_audio = len(audio_buf) >= 1600  # ~0.2s @ 8k mulaw
+        silent_gap = (now - last_audio_ts) >= 0.5 if last_audio_ts else False
+        if (not processing) and have_audio and (len(audio_buf) >= 5600 or (silent_gap and last_audio_ts)):
             buf = bytes(audio_buf)
             audio_buf = bytearray()
-            text = stt.transcribe(buf)
-            if text and text.strip():
-                log.info("caller: %s", text)
-                convo.append({"role": "user", "content": text})
-                reply = nous_client.chat(convo)
-                convo.append({"role": "assistant", "content": reply})
-                # keep last 10 turns
-                convo = convo[-10:]
-                log.info("agent : %s", reply)
-                # Chris may have embedded a [[SMS:...]] tag — strip it from
-                # what the caller hears, and deliver the contents to Brent.
-                spoken, sms = deliver_to_brent(reply)
-                if sms:
-                    log.info("agent delivered to Brent via SMS: %s", sms)
-                audio = tts.synthesize(spoken)
-                await send_audio(audio)
+            last_audio_ts = 0.0
+            processing = True
+            try:
+                text = stt.transcribe(buf)
+                if text and text.strip():
+                    log.info("caller: %s", text)
+                    convo.append({"role": "user", "content": text})
+                    try:
+                        reply = nous_client.chat(convo)
+                    except Exception as e:
+                        log.error("brain error: %s", e)
+                        reply = "I'm sorry, I didn't catch that — could you repeat?"
+                    convo.append({"role": "assistant", "content": reply})
+                    # keep last 10 turns
+                    convo = convo[-10:]
+                    log.info("agent : %s", reply)
+                    # Chris may have embedded a [[SMS:...]] tag — strip it from
+                    # what the caller hears, and deliver the contents to Brent.
+                    spoken, sms = deliver_to_brent(reply)
+                    if sms:
+                        log.info("agent delivered to Brent via SMS: %s", sms)
+                    try:
+                        audio = tts.synthesize(spoken)
+                    except Exception as e:
+                        log.error("tts error: %s", e)
+                        audio = b""
+                    if audio:
+                        await send_audio(audio)
+                    else:
+                        log.warning("no audio to send (empty reply/tts)")
+                else:
+                    log.info("caller audio but empty transcript (VAD/STT silent)")
+            except Exception as e:
+                log.error("turn processing crashed: %s", e)
+            finally:
+                processing = False
 
     await ws.close()
     return ws
