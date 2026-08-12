@@ -13,10 +13,13 @@ Also exposes:
   POST /swaig         SWAIG-style webhook: send_sms / send_email mid-call
 """
 import os
+import re
 import base64
 import json
 import asyncio
 import logging
+import urllib.request
+import urllib.error
 from aiohttp import web, WSMsgType
 
 import stt
@@ -30,6 +33,43 @@ PORT = int(os.getenv("PORT", "8080"))
 AUTH_TOKEN = os.getenv("SIGNALWIRE_SIGNING_KEY", "")  # optional bearer check
 WS_PATH = "/ws"
 STREAM_URL = os.getenv("PUBLIC_WS_URL", "")  # e.g. wss://techsploits-voice.onrender.com/ws
+
+# SignalWire creds for outbound SMS (deliver messages to Brent)
+SW_PROJECT = os.getenv("SIGNALWIRE_PROJECT_ID", "")
+SW_TOKEN = os.getenv("SIGNALWIRE_TOKEN", "")
+SW_SPACE = os.getenv("SIGNALWIRE_SPACE_URL", "").replace("https://", "").strip("/")
+SW_FROM = os.getenv("SIGNALWIRE_PHONE", "406-416-6665")
+BRENT_CELL = os.getenv("BRENT_CELL", "406-590-8432")
+
+# Matches the hidden [[SMS:...]] tag Chris appends (caller never hears it)
+_SMS_RE = re.compile(r"\[\[SMS:(.*?)\]\]", re.DOTALL)
+
+
+def deliver_to_brent(reply: str):
+    """Strip the [[SMS:...]] tag from the spoken reply and text Brent its
+    contents via SignalWire. Returns (spoken_text, sms_text_or_None)."""
+    m = _SMS_RE.search(reply)
+    if not m:
+        return reply, None
+    sms_text = m.group(1).strip()
+    spoken = _SMS_RE.sub("", reply).strip()
+    if not SW_PROJECT or not SW_TOKEN or not SW_SPACE:
+        log.warning("[sms] not configured (missing SignalWire env); skipping send")
+        return spoken, sms_text  # still return sms_text so it's logged
+    url = f"https://{SW_SPACE}/api/laml/2010-04-01/Accounts/{SW_PROJECT}/Messages.json"
+    data = urllib.parse.urlencode({
+        "From": SW_FROM, "To": BRENT_CELL, "Body": f"Techsploits call: {sms_text}"
+    }).encode()
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Authorization",
+                   "Basic " + base64.b64encode(f"{SW_PROJECT}:{SW_TOKEN}".encode()).decode())
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            log.info("[sms] sent to Brent (%d): %s", r.status, sms_text[:80])
+    except Exception as e:
+        log.error("[sms] FAILED to send to Brent: %s | text=%s", e, sms_text[:80])
+    return spoken, sms_text
 
 
 # ---------------- cXML endpoint ----------------
@@ -165,7 +205,12 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 # keep last 10 turns
                 convo = convo[-10:]
                 log.info("agent : %s", reply)
-                audio = tts.synthesize(reply)
+                # Chris may have embedded a [[SMS:...]] tag — strip it from
+                # what the caller hears, and deliver the contents to Brent.
+                spoken, sms = deliver_to_brent(reply)
+                if sms:
+                    log.info("agent delivered to Brent via SMS: %s", sms)
+                audio = tts.synthesize(spoken)
                 await send_audio(audio)
 
     await ws.close()
