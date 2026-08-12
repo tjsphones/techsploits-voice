@@ -41,7 +41,7 @@ SW_SPACE = os.getenv("SIGNALWIRE_SPACE_URL", "").replace("https://", "").strip("
 SW_FROM = os.getenv("SIGNALWIRE_PHONE", "406-416-6665")
 BRENT_CELL = os.getenv("BRENT_CELL", "406-590-8432")
 
-# Matches the hidden [[SMS:...]] tag Chris appends (caller never hears it)
+# Matches the hidden [[SMS:...]] tag Beth appends (caller never hears it)
 _SMS_RE = re.compile(r"\[\[SMS:(.*?)\]\]", re.DOTALL)
 
 
@@ -173,7 +173,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 # human-ish voice immediately (no dead air -> no premature hangup).
                 try:
                     greet = tts.synthesize(
-                        "Techsploits, this is Chris — how can I help you today?")
+                        "Techsploits, this is Beth — how can I help you today?")
                     await send_audio(greet)
                 except Exception as e:
                     log.warning("greeting failed: %s", e)
@@ -194,7 +194,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 
         # Turn trigger: process when we have ~0.7s of buffered audio, OR when
         # ~0.5s of silence has elapsed since the last frame AND we have >=0.2s
-        # buffered (so Chris answers after the caller STOPS talking, not only
+        # buffered (so Beth answers after the caller STOPS talking, not only
         # on long utterances). Skip if a turn is already in flight.
         now = asyncio.get_event_loop().time()
         have_audio = len(audio_buf) >= 1600  # ~0.2s @ 8k mulaw
@@ -218,7 +218,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                     # keep last 10 turns
                     convo = convo[-10:]
                     log.info("agent : %s", reply)
-                    # Chris may have embedded a [[SMS:...]] tag — strip it from
+                    # Beth may have embedded a [[SMS:...]] tag — strip it from
                     # what the caller hears, and deliver the contents to Brent.
                     spoken, sms = deliver_to_brent(reply)
                     if sms:
