@@ -44,6 +44,21 @@ BRENT_CELL = os.getenv("BRENT_CELL", "406-590-8432")
 # Matches the hidden [[SMS:...]] tag Beth appends (caller never hears it)
 _SMS_RE = re.compile(r"\[\[SMS:(.*?)\]\]", re.DOTALL)
 
+# Instant backchannel clip — generated once at startup so every mid-call turn
+# opens with an immediate "Okay," while STT+brain+TTS run (kills dead air).
+BACKCHANNEL = b""
+
+
+def _init_backchannel():
+    global BACKCHANNEL
+    try:
+        from tts import synthesize as _synth
+        BACKCHANNEL = _synth("Okay,")
+        log.info("backchannel clip ready (%d bytes)", len(BACKCHANNEL))
+    except Exception as e:
+        log.warning("backchannel init failed (no backchannel): %s", e)
+        BACKCHANNEL = b""
+
 
 def deliver_to_brent(reply: str):
     """Strip the [[SMS:...]] tag from the spoken reply and text Brent its
@@ -198,12 +213,23 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
         # on long utterances). Skip if a turn is already in flight.
         now = asyncio.get_event_loop().time()
         have_audio = len(audio_buf) >= 1600  # ~0.2s @ 8k mulaw
-        silent_gap = (now - last_audio_ts) >= 0.5 if last_audio_ts else False
+        silent_gap = (now - last_audio_ts) >= 0.35 if last_audio_ts else False
         if (not processing) and have_audio and (len(audio_buf) >= 5600 or (silent_gap and last_audio_ts)):
             buf = bytes(audio_buf)
             audio_buf = bytearray()
             last_audio_ts = 0.0
             processing = True
+
+            # Kill dead air: the instant the caller stops, play a cached
+            # backchannel. It's short and NON-blocking, so STT/brain/TTS keep
+            # running in parallel. By the time it finishes, the real reply is
+            # usually ready to append seamlessly (no gap the caller notices).
+            if BACKCHANNEL:
+                try:
+                    await send_audio(BACKCHANNEL)
+                except Exception as e:
+                    log.warning("backchannel play failed: %s", e)
+
             try:
                 text = stt.transcribe(buf)
                 if text and text.strip():
@@ -223,13 +249,23 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                     spoken, sms = deliver_to_brent(reply)
                     if sms:
                         log.info("agent delivered to Brent via SMS: %s", sms)
-                    try:
-                        audio = tts.synthesize(spoken)
-                    except Exception as e:
-                        log.error("tts error: %s", e)
-                        audio = b""
-                    if audio:
-                        await send_audio(audio)
+                    # Sentence-streamed playback: split the reply into sentences
+                    # and synthesize+play each back-to-back. The caller hears
+                    # Beth's FIRST words as soon as the first sentence is
+                    # synthesized (~1 sentence of TTS latency) instead of
+                    # waiting for the ENTIRE reply — the biggest dead-air win.
+                    if spoken:
+                        sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', spoken) if s.strip()]
+                        for s in sents:
+                            try:
+                                audio = tts.synthesize(s)
+                            except Exception as e:
+                                log.error("tts error: %s", e)
+                                audio = b""
+                            if audio:
+                                await send_audio(audio)
+                            else:
+                                log.warning("no audio for sentence: %r", s[:40])
                     else:
                         log.warning("no audio to send (empty reply/tts)")
                 else:
@@ -260,6 +296,9 @@ def make_app() -> web.Application:
 
 if __name__ == "__main__":
     app = make_app()
+    # Pre-generate the instant backchannel clip so mid-call turns have zero
+    # dead air (plays the moment the caller stops talking).
+    _init_backchannel()
     log.info("Starting voice loop on :%d (DRY_RUN=%s)", PORT,
              os.getenv("DRY_RUN", "false"))
     web.run_app(app, host="0.0.0.0", port=PORT)
